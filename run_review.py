@@ -1,9 +1,21 @@
 #!/usr/bin/env python
 """
-合同审查系统启动脚本
+合同审查系统启动脚本(v1.5)
+
+相对原版的改动:
+  1. 登录超时 30s → 10min(可用性)
+  2. 规范库路径修正(path bug 修掉)
+  3. 威科首页 URL 可配(支持校园代理)
+  4. 末尾新增一步:生成带修订痕迹的 .docx(红线稿)
+  5. ClauseExtractor 内部走 LLM 提取(格式无关)
 """
+import os
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
+
+# 先加载 .env
+load_dotenv()
 
 # 添加项目路径
 project_root = Path(__file__).parent
@@ -46,7 +58,8 @@ def main():
 
     # 3. 加载本地规范库
     print("\n[步骤3] 加载本地规范库...")
-    regulations_path = project_root.parent / "北京租房合同相关规范"
+    # v1.5 修复:原版的路径指向项目外,实际文件在 data/regulations 下
+    regulations_path = project_root / "data" / "regulations" / "北京租房合同相关规范"
     regulation_loader = RegulationLoader(str(regulations_path))
     print(f"✓ 规范库加载完成")
 
@@ -55,14 +68,18 @@ def main():
     weko_client = WekoMCPClient()
     weko_client.start_session()
 
-    # 打开威科先行首页
-    print("  正在打开威科先行首页...")
-    weko_client.open_home()
+    # 打开威科先行首页(v1.5:支持从环境变量读校园代理 URL)
+    weko_home_url = os.getenv('WEKO_HOME_URL') or None
+    if weko_home_url:
+        print(f"  正在打开威科先行(校园代理):{weko_home_url}")
+    else:
+        print("  正在打开威科先行首页...")
+    weko_client.open_home(url=weko_home_url)
 
-    # 等待用户登录
-    print("  请在浏览器中登录威科先行账号...")
-    print("  登录完成后，系统会自动继续（30秒超时）")
-    weko_client.wait_for_login(timeout_ms=30000)  # 30秒超时
+    # 等待用户登录(v1.5:默认 10 分钟,足够手动登录 SSO)
+    login_timeout_ms = int(os.getenv('WEKO_LOGIN_TIMEOUT_MS', '600000'))
+    print(f"  请在浏览器中登录(最多等 {login_timeout_ms // 1000} 秒)...")
+    weko_client.wait_for_login(timeout_ms=login_timeout_ms)
     print("✓ 威科先行MCP连接成功")
 
     try:
@@ -155,10 +172,60 @@ def main():
             f.write("【Agent④ 交叉验证】\n")
             f.write(validation_report.get('validation', '') + "\n\n")
 
+            # f.write("【Agent⑤ 最终审查意见】\n")
+            # f.write(final_report.get('opinion', '') + "\n\n")
             f.write("【Agent⑤ 最终审查意见】\n")
-            f.write(final_report.get('opinion', '') + "\n\n")
+            # 原版把意见书存为 'report_text',但读取时写成 'opinion'(bug)
+            # 这里兼容两种,优先读 report_text
+            f.write(final_report.get('report_text', '') or final_report.get('opinion', '') + "\n\n")
 
         print(f"✓ 文本报告已保存: {text_report_path}")
+
+        # v1.5 新增:生成带修订痕迹的 .docx 红线稿
+        print("\n[步骤11] 生成红线稿(带修订痕迹).docx...")
+        try:
+            original_md = parsed_doc.get('full_text', '')
+
+            # 让 LLM 把 opinion 中的修订意见应用到原合同上,得到"修改后"全文
+            from src.utils.llm_client import get_llm_client
+            llm = get_llm_client()
+            opinion_text = final_report.get('opinion', '') or final_report.get('report_text', '')
+
+            apply_prompt = f"""你是合同修订助手。下面有两份材料:
+A. 原合同全文
+B. 审查意见(含逐条修订建议)
+
+任务:
+基于 A 的原文逐处应用 B 的修订建议,输出"修改后合同全文"。
+
+核心原则(严格遵守):
+1. 原文中未涉及修改的部分必须 **一字不改** 保留
+2. 修改必须发生在原位,不要把原条款完整保留后在后面追加"优化版"
+3. 如果 B 中没有明确说要改的内容,一律保持原样
+4. 输出的是修改后的最终清洁版合同全文,不要附任何解释、注释、"修订说明"
+
+【A. 原合同全文】
+{original_md}
+
+【B. 审查意见】
+{opinion_text}
+
+请直接输出修改后的合同全文:
+"""
+            revised_md = llm.analyze(prompt=apply_prompt, max_tokens=8000)
+
+            # 调用原版在 MCP 里写好的 redline 导出工具
+            redline_path = output_dir / "红线稿.docx"
+            weko_client.export_redline_docx(
+                file_path=str(redline_path),
+                title="房屋转租合同审查(红线版)",
+                original_markdown=original_md,
+                revised_markdown=revised_md,
+            )
+            print(f"✓ 红线稿已保存: {redline_path}")
+        except Exception as e:
+            print(f"⚠ 红线稿生成失败: {e}")
+            print("  JSON/TXT 报告仍可用,红线稿可稍后基于 opinion 手动生成")
 
         print("\n" + "=" * 60)
         print("审查完成！")
@@ -166,6 +233,7 @@ def main():
         print(f"\n报告位置: {output_dir}")
         print(f"- JSON格式: review_report.json")
         print(f"- 文本格式: review_report.txt")
+        print(f"- 红线稿: 红线稿.docx")
 
     finally:
         # 关闭威科先行连接

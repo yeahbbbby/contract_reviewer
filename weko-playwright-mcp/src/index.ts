@@ -306,6 +306,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return textResult(JSON.stringify(result, null, 2));
   }
 
+  // if (name === 'weko_run_search') {
+  //   const input = z.object({
+  //     query: z.string(),
+  //     searchInputSelector: z.string().optional(),
+  //     submitSelector: z.string().optional(),
+  //   }).parse(args);
+
+  //   const selectors = [input.searchInputSelector ?? 'input[type="search"]', 'input[placeholder*="检索"]', 'input[placeholder*="搜索"]', 'textarea', 'input'];
+  //   let locator = null;
+  //   for (const selector of selectors) {
+  //     const candidate = page.locator(selector).first();
+  //     if (await candidate.count().catch(() => 0)) {
+  //       locator = candidate;
+  //       break;
+  //     }
+  //   }
+  //   if (!locator) {
+  //     throw new Error('No search input found on current page.');
+  //   }
+
+  //   await locator.fill(input.query);
+  //   if (input.submitSelector) {
+  //     await page.locator(input.submitSelector).first().click();
+  //   } else {
+  //     await locator.press('Enter');
+  //   }
+  //   await page.waitForLoadState('networkidle').catch(() => undefined);
+  //   return textResult(`Search submitted: ${input.query}\nURL: ${page.url()}\nTitle: ${await page.title()}`);
+  // }
   if (name === 'weko_run_search') {
     const input = z.object({
       query: z.string(),
@@ -313,17 +342,57 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       submitSelector: z.string().optional(),
     }).parse(args);
 
-    const selectors = [input.searchInputSelector ?? 'input[type="search"]', 'input[placeholder*="检索"]', 'input[placeholder*="搜索"]', 'textarea', 'input'];
-    let locator = null;
+    // v1.5.2 修复:先等页面静默,避免在加载中的页面上找搜索框
+    await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => undefined);
+    await page.waitForTimeout(1500);  // 给 SPA 组件渲染一点时间
+
+    // 候选选择器(按优先级排序)—— 排除 checkbox/switch 这种明显不是搜索框的
+    const tryFill = async (sel: string): Promise<any | null> => {
+      const candidates = page.locator(sel);
+      const n = await candidates.count().catch(() => 0);
+      for (let i = 0; i < n; i++) {
+        const el = candidates.nth(i);
+        // 过滤:不能是 checkbox/radio/hidden,必须可见可编辑
+        const type = await el.getAttribute('type').catch(() => null);
+        if (type && ['checkbox', 'radio', 'hidden', 'submit', 'button'].includes(type)) continue;
+        const role = await el.getAttribute('role').catch(() => null);
+        if (role === 'switch') continue;
+        const visible = await el.isVisible().catch(() => false);
+        if (!visible) continue;
+        const editable = await el.isEditable().catch(() => false);
+        if (!editable) continue;
+        return el;
+      }
+      return null;
+    };
+
+    const selectors = [
+      input.searchInputSelector,
+      'input[placeholder*="检索"]',
+      'input[placeholder*="搜索"]',
+      'input[placeholder*="关键词"]',
+      'input[placeholder*="请输入"]',
+      'input[placeholder*="输入"]',
+      'input[type="search"]',
+      'input[type="text"]',
+      'textarea',
+      'input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not([type="submit"]):not([type="button"])',
+    ].filter(Boolean) as string[];
+
+    let locator: any = null;
+    let usedSelector = '';
     for (const selector of selectors) {
-      const candidate = page.locator(selector).first();
-      if (await candidate.count().catch(() => 0)) {
-        locator = candidate;
+      const found = await tryFill(selector);
+      if (found) {
+        locator = found;
+        usedSelector = selector;
         break;
       }
     }
     if (!locator) {
-      throw new Error('No search input found on current page.');
+      const allInputs = await page.locator('input, textarea').count().catch(() => 0);
+      throw new Error(`No suitable search input found on ${page.url()}.\nPage had ${allInputs} input/textarea elements but none were visible + editable + non-checkbox.`);
     }
 
     await locator.fill(input.query);
@@ -333,7 +402,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       await locator.press('Enter');
     }
     await page.waitForLoadState('networkidle').catch(() => undefined);
-    return textResult(`Search submitted: ${input.query}\nURL: ${page.url()}\nTitle: ${await page.title()}`);
+    return textResult(`Search submitted: ${input.query}\nURL: ${page.url()}\nTitle: ${await page.title()}\nUsed selector: ${usedSelector}`);
   }
 
   if (name === 'weko_get_results') {

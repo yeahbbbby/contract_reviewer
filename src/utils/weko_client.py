@@ -125,9 +125,36 @@ class WekoMCPClient:
         """调用MCP工具（同步接口）"""
         return self._run_async(self._call_tool_async(tool_name, args))
 
-    def open_home(self) -> str:
-        """打开威科先行首页"""
-        result = self._call_tool("weko_open_home")
+    # def open_home(self) -> str:
+    #     """打开威科先行首页"""
+    #     result = self._call_tool("weko_open_home")
+    #     return result.get('text', '')
+    def open_home(self, url: Optional[str] = None) -> str:
+        """
+        打开威科先行首页。
+
+        Args:
+            url: 可选。若传入,则打开该 URL(用于校园代理等场景)。
+                 若不传,MCP 内部默认打开 https://www.wkinfo.com.cn/
+        """
+        args = {"url": url} if url else {}
+        result = self._call_tool("weko_open_home", args)
+        return result.get('text', '')
+
+    def export_redline_docx(self, file_path: str, title: str,
+                            original_markdown: str, revised_markdown: str) -> str:
+        """
+        导出带修订痕迹(tracked changes)的 .docx。
+
+        调用原版在 weko-playwright-mcp 里实现好的 weko_export_redline_docx。
+        输入原合同文本 + 修改后合同文本,输出的 .docx 里会有真实的 Word 修订痕迹。
+        """
+        result = self._call_tool("weko_export_redline_docx", {
+            "filePath": file_path,
+            "title": title,
+            "originalBodyMarkdown": original_markdown,
+            "revisedBodyMarkdown": revised_markdown,
+        })
         return result.get('text', '')
 
     def wait_for_login(self, timeout_ms: int = 180000) -> str:
@@ -149,51 +176,38 @@ class WekoMCPClient:
     def search_regulations(self, query: str, region: str = "北京",
                           include_keywords: List[str] = None,
                           exclude_keywords: List[str] = None) -> Dict:
-        """
-        检索法律法规
+        """检索法律法规(v1.5.4:校园代理 + 按回车触发搜索)"""
+        import os
+        import time
+        from urllib.parse import quote
 
-        Args:
-            query: 检索问题
-            region: 地区
-            include_keywords: 必须包含的关键词
-            exclude_keywords: 排除的关键词
-
-        Returns:
-            检索计划和结果
-        """
         try:
-            # 1. 打开法律法规工具
-            self._call_tool("weko_open_common_tool", {
-                "toolName": "法律法规",
-                "query": query
-            })
+            legislation_url = os.getenv('WEKO_LEGISLATION_URL')
+            if legislation_url:
+                sep = '&' if '?' in legislation_url else '?'
+                target_url = f"{legislation_url}{sep}tip={quote(query)}"
+                print(f"    导航到:{target_url}")
+                self._call_tool("weko_navigate", {"url": target_url})
+            else:
+                self._call_tool("weko_open_common_tool", {
+                    "toolName": "法律法规",
+                    "query": query
+                })
 
-            # 2. 构建检索计划（可选，如果工具不存在则跳过）
-            plan_text = ""
+            # 等页面加载(代理 + SPA 渲染)
+            time.sleep(3)
+
+            # v1.5.4:?tip= 只预填,要触发真正搜索需要按回车(或点搜索按钮)
+            # weko_run_search 会找到搜索框 → fill → press Enter
             try:
-                plan_args = {
-                    "question": query,
-                    "region": region
-                }
-                if include_keywords:
-                    plan_args["includeKeywords"] = include_keywords
-                if exclude_keywords:
-                    plan_args["excludeKeywords"] = exclude_keywords
-
-                plan_result = self._call_tool("weko_build_regulation_search_plan", plan_args)
-                plan_text = plan_result.get('text', '')
+                self._call_tool("weko_run_search", {"query": query})
+                time.sleep(2)  # 等搜索结果返回
             except Exception as e:
-                print(f"    跳过检索计划构建: {e}")
+                print(f"    run_search 失败(可能页面未就绪):{e}")
 
-            # 3. 执行检索
-            self._call_tool("weko_run_search", {
-                "query": query
-            })
+            plan_text = ""
 
-            # 4. 获取结果
-            results = self._call_tool("weko_get_results", {
-                "maxResults": 20
-            })
+            results = self._call_tool("weko_get_results", {"maxResults": 20})
 
             return {
                 "plan": plan_text,
@@ -201,66 +215,43 @@ class WekoMCPClient:
             }
         except Exception as e:
             print(f"    法规检索失败: {e}")
-            return {
-                "plan": "",
-                "results": ""
-            }
+            return {"plan": "", "results": ""}
+            return {"plan": "", "results": ""}
 
     def search_cases(self, query: str, region: str = "北京",
                     time_range: str = "近三年",
                     dispute_focus: List[str] = None,
                     include_keywords: List[str] = None,
                     exclude_keywords: List[str] = None) -> Dict:
-        """
-        检索裁判文书
+        """检索裁判文书(v1.5.4)"""
+        import os
+        import time
+        from urllib.parse import quote
 
-        Args:
-            query: 检索问题
-            region: 地区
-            time_range: 时间范围
-            dispute_focus: 争议焦点
-            include_keywords: 必须包含的关键词
-            exclude_keywords: 排除的关键词
-
-        Returns:
-            检索计划和结果
-        """
         try:
-            # 1. 打开裁判文书工具
-            self._call_tool("weko_open_common_tool", {
-                "toolName": "裁判文书",
-                "query": query
-            })
+            judgment_url = os.getenv('WEKO_JUDGMENT_URL')
+            if judgment_url:
+                sep = '&' if '?' in judgment_url else '?'
+                target_url = f"{judgment_url}{sep}tip={quote(query)}"
+                print(f"    导航到:{target_url}")
+                self._call_tool("weko_navigate", {"url": target_url})
+            else:
+                self._call_tool("weko_open_common_tool", {
+                    "toolName": "裁判文书",
+                    "query": query
+                })
 
-            # 2. 构建检索计划（可选，如果工具不存在则跳过）
-            plan_text = ""
+            time.sleep(3)
+
             try:
-                plan_args = {
-                    "question": query,
-                    "region": region,
-                    "timeRange": time_range
-                }
-                if dispute_focus:
-                    plan_args["disputeFocus"] = dispute_focus
-                if include_keywords:
-                    plan_args["includeKeywords"] = include_keywords
-                if exclude_keywords:
-                    plan_args["excludeKeywords"] = exclude_keywords
-
-                plan_result = self._call_tool("weko_build_case_search_plan", plan_args)
-                plan_text = plan_result.get('text', '')
+                self._call_tool("weko_run_search", {"query": query})
+                time.sleep(2)
             except Exception as e:
-                print(f"    跳过检索计划构建: {e}")
+                print(f"    run_search 失败(可能页面未就绪):{e}")
 
-            # 3. 执行检索
-            self._call_tool("weko_run_search", {
-                "query": query
-            })
+            plan_text = ""
 
-            # 4. 获取结果
-            results = self._call_tool("weko_get_results", {
-                "maxResults": 20
-            })
+            results = self._call_tool("weko_get_results", {"maxResults": 20})
 
             return {
                 "plan": plan_text,
@@ -268,10 +259,29 @@ class WekoMCPClient:
             }
         except Exception as e:
             print(f"    案例检索失败: {e}")
-            return {
-                "plan": "",
-                "results": ""
-            }
+            return {"plan": "", "results": ""}
+        
+    def _trigger_search_button(self):
+        """
+        v1.5.4:威科的 ?tip= 只预填搜索框不触发搜索,
+        需要额外点"搜索"按钮。尝试几种常见的 selector,哪个命中就用哪个。
+        """
+        # 从截图看,"搜索"按钮上既有放大镜图标也有"搜索"两个字,
+        # 所以按文本匹配最稳定
+        selectors = [
+            'button:has-text("搜索")',          # 带"搜索"字样的 button
+            'span.el-button:has-text("搜索")',  # Element UI 风格
+            '[class*="search"] button',          # class 含 search
+            'button[type="submit"]',             # 提交按钮
+        ]
+        for sel in selectors:
+            try:
+                self._call_tool("weko_click", {"selector": sel})
+                print(f"    已点击搜索按钮(selector={sel})")
+                return
+            except Exception:
+                continue
+        print("    ⚠ 没找到搜索按钮,可能页面结构变了")
 
     def open_result(self, index: int) -> str:
         """
